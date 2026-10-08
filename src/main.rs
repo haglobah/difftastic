@@ -67,7 +67,6 @@ use options::{FilePermissions, USAGE};
 use crate::conflicts::{apply_conflict_markers, START_LHS_MARKER};
 use crate::constants::Side;
 use crate::diff::changes::ChangeMap;
-use crate::diff::shortest_path::ExceededGraphLimit;
 use crate::diff::{shortest_path, unchanged};
 use crate::display::context::opposite_positions;
 use crate::display::hunks::{matched_pos_to_hunks, merge_adjacent};
@@ -130,7 +129,7 @@ use crate::lines::MaxLine;
 use crate::options::{DiffOptions, DisplayMode, DisplayOptions, FileArgument, Mode};
 use crate::parse::syntax::init_all_info;
 use crate::parse::tree_sitter_parser as tsp;
-use crate::shortest_path::mark_syntax;
+use crate::shortest_path::mark_syntax_sections;
 use crate::summary::{DiffResult, FileContent, FileFormat};
 use crate::syntax::init_next_prev;
 
@@ -707,25 +706,17 @@ fn diff_file_content(
                                 unchanged::mark_unchanged(&lhs, &rhs, &mut change_map)
                             };
 
-                            let mut exceeded_graph_limit = false;
-
-                            for (lhs_section_nodes, rhs_section_nodes) in possibly_changed {
-                                init_next_prev(&lhs_section_nodes);
-                                init_next_prev(&rhs_section_nodes);
-
-                                match mark_syntax(
-                                    lhs_section_nodes.first().copied(),
-                                    rhs_section_nodes.first().copied(),
-                                    &mut change_map,
-                                    diff_options.graph_limit,
-                                ) {
-                                    Ok(()) => {}
-                                    Err(ExceededGraphLimit {}) => {
-                                        exceeded_graph_limit = true;
-                                        break;
-                                    }
-                                }
+                            for (lhs_section_nodes, rhs_section_nodes) in &possibly_changed {
+                                init_next_prev(lhs_section_nodes);
+                                init_next_prev(rhs_section_nodes);
                             }
+
+                            let exceeded_graph_limit = mark_syntax_sections(
+                                &possibly_changed,
+                                &mut change_map,
+                                diff_options.graph_limit,
+                            )
+                            .is_err();
 
                             if exceeded_graph_limit {
                                 let (lhs_positions, rhs_positions) =

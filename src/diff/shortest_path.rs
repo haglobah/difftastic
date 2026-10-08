@@ -43,6 +43,8 @@
 
 use std::cmp::Reverse;
 use std::env;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
 
 use bumpalo::Bump;
 use radix_heap::RadixHeapMap;
@@ -237,6 +239,95 @@ pub(crate) fn mark_syntax<'a>(
     );
 
     populate_change_map(&route, change_map);
+    Ok(())
+}
+
+/// A value moved or shared across the threads of
+/// [`mark_syntax_sections`].
+///
+/// Syntax nodes hold `Cell`s, so they are neither `Send` nor `Sync`.
+/// During the search nothing writes to them: `init_next_prev` runs for
+/// every section beforehand, and the graph search only reads the
+/// syntax and writes to vertices in its own arena.
+struct ReadOnlySyntax<T>(T);
+
+// SAFETY: see above; no thread writes to the shared syntax nodes while
+// the scoped threads run.
+unsafe impl<T> Send for ReadOnlySyntax<T> {}
+unsafe impl<T> Sync for ReadOnlySyntax<T> {}
+
+/// Run [`mark_syntax`] on each section, several sections at once.
+///
+/// Sections are disjoint subtrees whose `init_next_prev` has already
+/// run, so they can be searched in any order. Their changes go into
+/// separate maps that are merged into `change_map` afterwards.
+pub(crate) fn mark_syntax_sections<'a>(
+    sections: &[(Vec<&'a Syntax<'a>>, Vec<&'a Syntax<'a>>)],
+    change_map: &mut ChangeMap<'a>,
+    graph_limit: usize,
+) -> Result<(), ExceededGraphLimit> {
+    let workers = thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(sections.len());
+
+    if workers <= 1 {
+        for (lhs_section_nodes, rhs_section_nodes) in sections {
+            mark_syntax(
+                lhs_section_nodes.first().copied(),
+                rhs_section_nodes.first().copied(),
+                change_map,
+                graph_limit,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let shared = ReadOnlySyntax(sections);
+    let next = AtomicUsize::new(0);
+    let exceeded = AtomicBool::new(false);
+
+    let maps: Vec<ReadOnlySyntax<ChangeMap<'a>>> = thread::scope(|s| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let shared = &shared;
+                let next = &next;
+                let exceeded = &exceeded;
+                s.spawn(move || {
+                    let mut local = ChangeMap::default();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= shared.0.len() || exceeded.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let (lhs_section_nodes, rhs_section_nodes) = &shared.0[i];
+                        if mark_syntax(
+                            lhs_section_nodes.first().copied(),
+                            rhs_section_nodes.first().copied(),
+                            &mut local,
+                            graph_limit,
+                        )
+                        .is_err()
+                        {
+                            exceeded.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    ReadOnlySyntax(local)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("Graph search thread panicked"))
+            .collect()
+    });
+
+    if exceeded.load(Ordering::Relaxed) {
+        return Err(ExceededGraphLimit {});
+    }
+    for map in maps {
+        change_map.extend(map.0);
+    }
     Ok(())
 }
 

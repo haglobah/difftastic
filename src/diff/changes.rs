@@ -30,6 +30,11 @@ impl<'a> ChangeMap<'a> {
         self.changes.insert(node.id(), ck);
     }
 
+    /// Add all of `other`'s entries, replacing any for the same node.
+    pub(crate) fn extend(&mut self, other: ChangeMap<'a>) {
+        self.changes.extend(other.changes);
+    }
+
     pub(crate) fn get(&self, node: &Syntax<'a>) -> Option<ChangeKind<'a>> {
         self.changes.get(&node.id()).copied()
     }
