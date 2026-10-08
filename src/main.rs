@@ -106,6 +106,16 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+/// Back the heap with transparent huge pages. The graph search
+/// allocates hundreds of MiB of short-lived vertices on large files;
+/// with 4 KiB pages, page faults and TLB misses took about half the
+/// run time. Kernels default THP to `madvise`, so ask for it.
+/// `_RJEM_MALLOC_CONF` in the environment still overrides this.
+#[cfg(target_os = "linux")]
+#[allow(non_upper_case_globals)]
+#[export_name = "_rjem_malloc_conf"]
+pub static malloc_conf: &[u8] = b"thp:always\0";
+
 use std::path::Path;
 use std::{env, thread};
 
